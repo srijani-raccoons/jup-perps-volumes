@@ -1,0 +1,247 @@
+name: Update Jupiter Perpetuals Volume Data
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # Every hour
+  workflow_dispatch: # Allow manual triggers
+    inputs:
+      backfill_days:
+        description: 'Number of days to backfill (optional)'
+        required: false
+        default: '1'
+
+permissions:
+  contents: write  # This allows the action to push commits
+
+jobs:
+  update-volume:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        
+    - name: Install dependencies
+      run: |
+        npm init -y
+        npm install axios csv-parser csv-writer
+        
+    - name: Update volume data
+      run: |
+        cat << 'EOF' > update_volume.js
+        const axios = require('axios');
+        const fs = require('fs');
+        const csv = require('csv-parser');
+        const csvWriter = require('csv-writer');
+
+        // Jupiter API configuration
+        const TOKENS = [
+          'So11111111111111111111111111111111111111112', // SOL
+          '3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh', // WBTC
+          '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs'  // ETH
+        ];
+
+        const HEADERS = {
+          'accept': '*/*',
+          'accept-language': 'en-US,en;q=0.9',
+          'content-type': 'application/json',
+          'referrer': 'https://www.jup.ag/',
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        };
+
+        async function fetchVolumeForToken(token) {
+          const url = `https://perp-api.jup.ag/trpc/tradeVolume?batch=1&input={"0":{"json":{"mint":"${token}"}}}`;
+          try {
+            const response = await axios.get(url, { headers: HEADERS });
+            const volume = response.data[0]?.result?.data?.json?.volume || 0;
+            
+            // Extract date from response headers
+            const dateHeader = response.headers['date'] || response.headers['Date'];
+            let apiDate = null;
+            
+            if (dateHeader) {
+              // Parse the date header (e.g., "Tue, 17 Jun 2025 22:07:24 GMT")
+              const parsedDate = new Date(dateHeader);
+              apiDate = parsedDate.toISOString().split('T')[0]; // Convert to YYYY-MM-DD
+            }
+            
+            return {
+              volume: volume,
+              date: apiDate,
+              dateHeader: dateHeader
+            };
+          } catch (error) {
+            console.error(`Error fetching volume for ${token}:`, error.message);
+            return { volume: 0, date: null, dateHeader: null };
+          }
+        }
+
+        async function getTotalVolumeWithDate() {
+          console.log('Fetching volume data from Jupiter API...');
+          const results = await Promise.all(TOKENS.map(fetchVolumeForToken));
+          
+          // Extract volumes and dates
+          const volumes = results.map(r => r.volume);
+          const dates = results.map(r => r.date).filter(d => d !== null);
+          const dateHeaders = results.map(r => r.dateHeader).filter(d => d !== null);
+          
+          const totalVolume = volumes.reduce((sum, vol) => sum + vol, 0);
+          
+          // Determine the actual date from API response headers
+          let apiDate = null;
+          
+          if (dates.length > 0) {
+            // Use the most common date from the responses
+            const dateFreq = {};
+            dates.forEach(d => dateFreq[d] = (dateFreq[d] || 0) + 1);
+            apiDate = Object.keys(dateFreq).reduce((a, b) => dateFreq[a] > dateFreq[b] ? a : b);
+            console.log(`API date from headers: ${apiDate}`);
+            console.log(`Original date headers: ${dateHeaders.join(', ')}`);
+          } else {
+            // Fallback: use current date
+            apiDate = new Date().toISOString().split('T')[0];
+            console.log(`Using current date as fallback: ${apiDate}`);
+          }
+          
+          console.log(`Total volume: ${totalVolume} for date: ${apiDate}`);
+          return { volume: totalVolume, date: apiDate };
+        }
+
+        function convertToCSVDate(isoDate) {
+          // Convert YYYY-MM-DD to DD/MM/YYYY
+          const [year, month, day] = isoDate.split('-');
+          return `${day}/${month}/${year}`;
+        }
+
+        function parseDate(dateStr) {
+          const [day, month, year] = dateStr.split('/');
+          return new Date(year, month - 1, day);
+        }
+
+        async function updateCSV() {
+          // Get volume data with actual date from API
+          const { volume: currentVolume, date: apiDate } = await getTotalVolumeWithDate();
+          const csvDateStr = convertToCSVDate(apiDate);
+          
+          // Read existing CSV
+          const existingData = [];
+          if (fs.existsSync('perps_daily_volume.csv')) {
+            await new Promise((resolve) => {
+              fs.createReadStream('perps_daily_volume.csv')
+                .pipe(csv())
+                .on('data', (row) => existingData.push(row))
+                .on('end', resolve);
+            });
+          }
+
+          // Check if this date's entry exists
+          const dateIndex = existingData.findIndex(row => row.Date === csvDateStr);
+          
+          if (dateIndex >= 0) {
+            // Update existing entry only if volume is different
+            const existingVolume = parseInt(existingData[dateIndex].Volume);
+            if (existingVolume !== currentVolume) {
+              console.log(`Updating entry for ${csvDateStr}: ${existingVolume} → ${currentVolume}`);
+              existingData[dateIndex].Volume = currentVolume.toString();
+            } else {
+              console.log(`No change for ${csvDateStr}, volume still ${currentVolume}`);
+              return { updated: false, volume: currentVolume, date: csvDateStr };
+            }
+          } else {
+            // Add new entry
+            console.log(`Adding new entry for ${csvDateStr}: ${currentVolume}`);
+            existingData.push({
+              Date: csvDateStr,
+              Volume: currentVolume.toString()
+            });
+          }
+
+          // Sort by date (newest first)
+          existingData.sort((a, b) => parseDate(b.Date) - parseDate(a.Date));
+
+          // Write back to CSV
+          const writer = csvWriter.createObjectCsvWriter({
+            path: 'perps_daily_volume.csv',
+            header: [
+              { id: 'Date', title: 'Date' },
+              { id: 'Volume', title: 'Volume' }
+            ]
+          });
+
+          await writer.writeRecords(existingData);
+          console.log('CSV updated successfully');
+          
+          return { updated: true, volume: currentVolume, date: csvDateStr };
+        }
+
+        // Main execution
+        async function main() {
+          try {
+            const result = await updateCSV();
+            
+            // Output for GitHub Actions
+            console.log(`Volume: ${result.volume}`);
+            console.log(`Date: ${result.date}`);
+            console.log(`Updated: ${result.updated}`);
+            
+          } catch (error) {
+            console.error('Error:', error);
+            process.exit(1);
+          }
+        }
+
+        main();
+        EOF
+
+        # Run the update script
+        node update_volume.js
+
+    - name: Debug CSV and git status
+      run: |
+        echo "=== CSV FILE STATUS ==="
+        ls -la perps_daily_volume.csv
+        echo ""
+        echo "=== LAST 10 LINES OF CSV ==="
+        tail -10 perps_daily_volume.csv
+        echo ""
+        echo "=== GIT STATUS ==="
+        git status
+        echo ""
+        echo "=== GIT DIFF FOR CSV ==="
+        git diff perps_daily_volume.csv
+
+    - name: Check for changes
+      id: git-check
+      run: |
+        git diff --exit-code perps_daily_volume.csv || echo "changed=true" >> $GITHUB_OUTPUT
+        
+    - name: Commit and push changes
+      if: steps.git-check.outputs.changed == 'true'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add perps_daily_volume.csv
+        git commit -m "Update Jupiter volume data - $(date -u '+%Y-%m-%d %H:%M UTC')"
+        git push
+        echo "✅ CSV updated and committed"
+        
+    - name: Summary
+      if: always()
+      run: |
+        echo "## Jupiter Volume Update Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Timestamp**: $(date -u)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Run Number**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ job.status }}" = "success" ]; then
+          echo "- **Result**: ✅ Update completed successfully" >> $GITHUB_STEP_SUMMARY
+          if [ -f "perps_daily_volume.csv" ]; then
+            echo "- **CSV**: Updated with latest data" >> $GITHUB_STEP_SUMMARY
+            echo "- **Latest Entry**: $(tail -1 perps_daily_volume.csv)" >> $GITHUB_STEP_SUMMARY
+          fi
+        else
+          echo "- **Result**: ❌ Update failed - check logs" >> $GITHUB_STEP_SUMMARY
+        fi
