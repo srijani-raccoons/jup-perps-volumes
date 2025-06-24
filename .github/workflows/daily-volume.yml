@@ -54,11 +54,22 @@ jobs:
         };
 
         async function fetchVolumeForToken(token) {
-          const url = `https://perp-api.jup.ag/trpc/tradeVolume?batch=1&input={"0":{"json":{"mint":"${token}"}}}`;
+          const url = `https://perps-api.jup.ag/v1/market-stats?mint=${token}`;
           try {
             const response = await axios.get(url, { headers: HEADERS });
-            const volume = response.data[0]?.result?.data?.json?.volume || 0;
             
+            // Log response structure for debugging
+            console.log(`API Response for ${token}:`, JSON.stringify(response.data, null, 2));
+            
+            // Try different possible volume field names
+            const volume = response.data?.volume24h || 
+                          response.data?.dailyVolume || 
+                          response.data?.volume || 
+                          response.data?.stats?.volume24h ||
+                          response.data?.stats?.dailyVolume ||
+                          0;
+            
+            // Extract date from response headers
             const dateHeader = response.headers['date'] || response.headers['Date'];
             let apiDate = null;
             
@@ -67,35 +78,52 @@ jobs:
               apiDate = parsedDate.toISOString().split('T')[0];
             }
             
+            console.log(`Extracted volume for ${token}: ${volume}`);
+            
             return {
               volume: volume,
               date: apiDate,
-              dateHeader: dateHeader
+              dateHeader: dateHeader,
+              token: token
             };
           } catch (error) {
             console.error(`Error fetching volume for ${token}:`, error.message);
-            return { volume: 0, date: null, dateHeader: null };
+            if (error.response) {
+              console.error(`Response status: ${error.response.status}`);
+              console.error(`Response data:`, error.response.data);
+            }
+            return { volume: 0, date: null, dateHeader: null, token: token };
           }
         }
 
         async function getTotalVolumeWithDate() {
-          console.log('Fetching volume data from Jupiter API...');
+          console.log('Fetching volume data from Jupiter v1/market-stats API...');
           const results = await Promise.all(TOKENS.map(fetchVolumeForToken));
           
+          // Extract volumes and dates
           const volumes = results.map(r => r.volume);
           const dates = results.map(r => r.date).filter(d => d !== null);
           const dateHeaders = results.map(r => r.dateHeader).filter(d => d !== null);
           
           const totalVolume = volumes.reduce((sum, vol) => sum + vol, 0);
           
+          // Log individual volumes for debugging
+          results.forEach(result => {
+            console.log(`${result.token}: ${result.volume}`);
+          });
+          
+          // Determine the actual date from API response headers
           let apiDate = null;
           
           if (dates.length > 0) {
+            // Use the most common date from the responses
             const dateFreq = {};
             dates.forEach(d => dateFreq[d] = (dateFreq[d] || 0) + 1);
             apiDate = Object.keys(dateFreq).reduce((a, b) => dateFreq[a] > dateFreq[b] ? a : b);
             console.log(`API date from headers: ${apiDate}`);
+            console.log(`Original date headers: ${dateHeaders.join(', ')}`);
           } else {
+            // Fallback: use current UTC date
             apiDate = new Date().toISOString().split('T')[0];
             console.log(`Using current date as fallback: ${apiDate}`);
           }
@@ -105,16 +133,19 @@ jobs:
         }
 
         function convertToCSVDate(isoDate) {
+          // Convert YYYY-MM-DD to DD/MM/YYYY
           const [year, month, day] = isoDate.split('-');
           return `${day}/${month}/${year}`;
         }
 
         function parseCSVDate(dateStr) {
+          // Convert DD/MM/YYYY to YYYY-MM-DD
           const [day, month, year] = dateStr.split('/');
           return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
         }
 
         function parseDate(dateStr) {
+          // Parse DD/MM/YYYY for sorting
           const [day, month, year] = dateStr.split('/');
           return new Date(year, month - 1, day);
         }
@@ -152,8 +183,10 @@ jobs:
             });
           }
 
+          // Sort by date (newest first)
           existingData.sort((a, b) => parseDate(b.Date) - parseDate(a.Date));
 
+          // Write back to CSV
           const writer = csvWriter.createObjectCsvWriter({
             path: 'perps_daily_volume.csv',
             header: [
@@ -187,12 +220,15 @@ jobs:
             });
           }
 
+          // Sort by date (newest first)
           data.sort((a, b) => new Date(b.date) - new Date(a.date));
           
           const jsonOutput = {
             data: data,
             lastUpdated: new Date().toISOString(),
-            totalRecords: data.length
+            totalRecords: data.length,
+            source: "Jupiter v1/market-stats API",
+            tokens: TOKENS
           };
           
           fs.writeFileSync('perps_daily_volume.json', JSON.stringify(jsonOutput, null, 2));
@@ -203,16 +239,20 @@ jobs:
 
         async function main() {
           try {
+            console.log('=== Jupiter Volume Update Started ===');
+            
             const csvResult = await updateCSV();
             const jsonResult = await updateJSON();
             
+            console.log('=== Update Summary ===');
             console.log(`Volume: ${csvResult.volume}`);
             console.log(`Date: ${csvResult.date}`);
             console.log(`CSV Updated: ${csvResult.updated}`);
             console.log(`JSON Records: ${jsonResult.totalRecords}`);
+            console.log(`Data Range: ${jsonResult.data[jsonResult.data.length-1]?.date} to ${jsonResult.data[0]?.date}`);
             
           } catch (error) {
-            console.error('Error:', error);
+            console.error('Error in main process:', error);
             process.exit(1);
           }
         }
@@ -234,8 +274,8 @@ jobs:
         echo "=== LAST 5 LINES OF CSV ==="
         tail -5 perps_daily_volume.csv
         echo ""
-        echo "=== JSON SAMPLE ==="
-        head -20 perps_daily_volume.json
+        echo "=== JSON METADATA ==="
+        head -10 perps_daily_volume.json
         echo ""
         echo "=== GIT STATUS ==="
         git status
@@ -255,7 +295,7 @@ jobs:
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         git add perps_daily_volume.csv perps_daily_volume.json
-        git commit -m "Update Jupiter volume data (CSV + JSON) - $(date -u '+%Y-%m-%d %H:%M UTC')"
+        git commit -m "Update Jupiter volume data (v1/market-stats API) - $(date -u '+%Y-%m-%d %H:%M UTC')"
         git push
         echo "✅ CSV and JSON updated and committed"
         
@@ -266,6 +306,7 @@ jobs:
         echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Timestamp**: $(date -u)" >> $GITHUB_STEP_SUMMARY
         echo "- **Run Number**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **API Endpoint**: v1/market-stats" >> $GITHUB_STEP_SUMMARY
         if [ "${{ job.status }}" = "success" ]; then
           echo "- **Result**: ✅ Update completed successfully" >> $GITHUB_STEP_SUMMARY
           if [ -f "perps_daily_volume.csv" ]; then
