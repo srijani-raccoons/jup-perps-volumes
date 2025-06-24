@@ -58,16 +58,10 @@ jobs:
           try {
             const response = await axios.get(url, { headers: HEADERS });
             
-            // Log response structure for debugging
-            console.log(`API Response for ${token}:`, JSON.stringify(response.data, null, 2));
-            
-            // Try different possible volume field names
-            const volume = response.data?.volume24h || 
-                          response.data?.dailyVolume || 
-                          response.data?.volume || 
-                          response.data?.stats?.volume24h ||
-                          response.data?.stats?.dailyVolume ||
-                          0;
+            // Extract volume from the 'volume' field and convert to number
+            const data = response.data;
+            const volumeStr = data?.volume || '0';
+            const volume = parseFloat(volumeStr);
             
             // Extract date from response headers
             const dateHeader = response.headers['date'] || response.headers['Date'];
@@ -78,7 +72,7 @@ jobs:
               apiDate = parsedDate.toISOString().split('T')[0];
             }
             
-            console.log(`Extracted volume for ${token}: ${volume}`);
+            console.log(`Extracted volume for ${token}: ${volume.toLocaleString()}`);
             
             return {
               volume: volume,
@@ -101,15 +95,16 @@ jobs:
           const results = await Promise.all(TOKENS.map(fetchVolumeForToken));
           
           // Extract volumes and dates
-          const volumes = results.map(r => r.volume);
+          const volumes = results.map(r => r.volume || 0);
           const dates = results.map(r => r.date).filter(d => d !== null);
           const dateHeaders = results.map(r => r.dateHeader).filter(d => d !== null);
           
+          // Properly sum volumes as numbers
           const totalVolume = volumes.reduce((sum, vol) => sum + vol, 0);
           
           // Log individual volumes for debugging
           results.forEach(result => {
-            console.log(`${result.token}: ${result.volume}`);
+            console.log(`${result.token}: ${(result.volume || 0).toLocaleString()}`);
           });
           
           // Determine the actual date from API response headers
@@ -128,8 +123,8 @@ jobs:
             console.log(`Using current date as fallback: ${apiDate}`);
           }
           
-          console.log(`Total volume: ${totalVolume} for date: ${apiDate}`);
-          return { volume: totalVolume, date: apiDate };
+          console.log(`Total volume: ${totalVolume.toLocaleString()} for date: ${apiDate}`);
+          return { volume: Math.round(totalVolume), date: apiDate };
         }
 
         function convertToCSVDate(isoDate) {
@@ -169,14 +164,14 @@ jobs:
           if (dateIndex >= 0) {
             const existingVolume = parseInt(existingData[dateIndex].Volume);
             if (existingVolume !== currentVolume) {
-              console.log(`Updating entry for ${csvDateStr}: ${existingVolume} → ${currentVolume}`);
+              console.log(`Updating entry for ${csvDateStr}: ${existingVolume.toLocaleString()} → ${currentVolume.toLocaleString()}`);
               existingData[dateIndex].Volume = currentVolume.toString();
             } else {
-              console.log(`No change for ${csvDateStr}, volume still ${currentVolume}`);
+              console.log(`No change for ${csvDateStr}, volume still ${currentVolume.toLocaleString()}`);
               return { updated: false, volume: currentVolume, date: csvDateStr };
             }
           } else {
-            console.log(`Adding new entry for ${csvDateStr}: ${currentVolume}`);
+            console.log(`Adding new entry for ${csvDateStr}: ${currentVolume.toLocaleString()}`);
             existingData.push({
               Date: csvDateStr,
               Volume: currentVolume.toString()
@@ -245,7 +240,7 @@ jobs:
             const jsonResult = await updateJSON();
             
             console.log('=== Update Summary ===');
-            console.log(`Volume: ${csvResult.volume}`);
+            console.log(`Volume: ${csvResult.volume.toLocaleString()}`);
             console.log(`Date: ${csvResult.date}`);
             console.log(`CSV Updated: ${csvResult.updated}`);
             console.log(`JSON Records: ${jsonResult.totalRecords}`);
