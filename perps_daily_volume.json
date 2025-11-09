@@ -2,7 +2,7 @@
   "data": [
     {
       "date": "2025-11-09",
-      "volume": 225080446
+      "volume": 218437535
     },
     {
       "date": "2025-11-08",
@@ -2629,7 +2629,7 @@
       "volume": 196202676
     }
   ],
-  "lastUpdated": "2025-11-09T05:24:25.072Z",
+  "lastUpdated": "2025-11-09T06:35:10.523Z",
   "totalRecords": 657,
   "source": "Jupiter v1/market-stats API",
   "tokens": [
