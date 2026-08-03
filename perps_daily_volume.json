@@ -2,7 +2,7 @@
   "data": [
     {
       "date": "2026-08-03",
-      "volume": 125196051
+      "volume": 126810179
     },
     {
       "date": "2026-08-02",
@@ -3697,7 +3697,7 @@
       "volume": 196202676
     }
   ],
-  "lastUpdated": "2026-08-03T17:58:12.545Z",
+  "lastUpdated": "2026-08-03T19:50:08.328Z",
   "totalRecords": 924,
   "source": "Jupiter v1/market-stats API",
   "tokens": [
